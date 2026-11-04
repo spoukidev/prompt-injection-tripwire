@@ -1,0 +1,81 @@
+# Prompt-Injection Tripwire stack. Everything is local: tools are sandboxed mocks and the
+# "attacker" is a local server for *.test domains. No external API keys are needed.
+#
+#   docker compose up -d          # proxy :8080, attacker :8081, dashboard :8501, demo agent
+#   make bench                    # benchmark (uses the proxy over HTTP if it is up)
+#   docker compose run --rm bench # same, entirely inside Docker
+#   docker compose --profile llm up -d ollama   # optional local model for the LLM judge / OllamaLLM
+
+x-app: &app
+  build: .
+  image: prompt-injection-tripwire:latest
+  volumes:
+    - ./results:/app/results
+
+services:
+  attacker:
+    <<: *app
+    command: ["uvicorn", "attacks.server:app", "--host", "0.0.0.0", "--port", "8081"]
+    ports: ["8081:8081"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8081/health').raise_for_status()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  proxy:
+    <<: *app
+    command: ["uvicorn", "tripwire.server:app", "--host", "0.0.0.0", "--port", "8080"]
+    ports: ["8080:8080"]
+    environment:
+      ATTACKER_URL: http://attacker:8081
+      TRIPWIRE_DB: sqlite:////app/results/audit.db
+      TRIPWIRE_APPROVAL_MODE: queue
+      # Benchmark-only switches: per-session fixtures and the OFF-mode bypass header.
+      # Never set these in a real deployment.
+      TRIPWIRE_BENCH_MODE: "1"
+      TRIPWIRE_ALLOW_BYPASS: "1"
+    depends_on:
+      attacker: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health').raise_for_status()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  dashboard:
+    <<: *app
+    command: ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+    ports: ["8501:8501"]
+    environment:
+      TRIPWIRE_URL: http://proxy:8080
+    depends_on:
+      proxy: {condition: service_healthy}
+
+  agent:
+    # Runs two demo scenarios through the proxy (one benign, one attack) and exits.
+    <<: *app
+    command: ["python", "-m", "agent.agent", "--attack", "do-01", "--benign", "bw-03", "--tripwire", "on", "--proxy-url", "http://proxy:8080"]
+    environment:
+      ATTACKER_URL: http://attacker:8081
+    depends_on:
+      proxy: {condition: service_healthy}
+    restart: "no"
+
+  bench:
+    <<: *app
+    profiles: ["bench"]
+    command: ["python", "-m", "eval.run_benchmark", "--transport", "http", "--proxy-url", "http://proxy:8080"]
+    environment:
+      ATTACKER_URL: http://attacker:8081
+    depends_on:
+      proxy: {condition: service_healthy}
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["llm"]
+    ports: ["11434:11434"]
+    volumes: ["ollama:/root/.ollama"]
+
+volumes:
+  ollama: {}

@@ -1,0 +1,7 @@
+# Optional: fine-tune a transformer classifier (python -m classifier.train --backend distilbert)
+# and/or fetch public datasets (python -m classifier.build_dataset --with-public).
+torch
+transformers>=4.44
+datasets>=2.20
+accelerate>=0.33
+pyarrow

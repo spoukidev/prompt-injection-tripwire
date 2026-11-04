@@ -1,0 +1,136 @@
+# Prompt-Injection Tripwire policy.
+#
+# Loaded once at startup (TRIPWIRE_POLICY env var overrides the path).
+# For each tool call the proxy computes a set of *signals* (detector scores in
+# [0,1] plus a few contextual features) and walks the tool's rules top-down; the
+# first rule whose `when` conditions ALL hold decides. Conditions are written
+# ">=0.8", "<0.3", "==1" or a bare number (meaning ">=").
+#
+# Signals available in `when`:
+#   canary        canary_leak detector (1.0 = session canary inside a destination field)
+#   taint         fuzzy overlap of data fields with untrusted text (0..1)
+#   heuristics    rule-based instruction-likeness of the outgoing data
+#   classifier    ML instruction-likeness of the outgoing data
+#   instruction   max(heuristics, classifier)
+#   exfil         exfiltration-sink detector (untrusted destination, secrets, image beacons)
+#   llm_judge     optional second opinion (only runs on calls already flagged)
+#   memory_write  1 if the call writes to a path the agent reads back later
+#   sensitive_read 1 if the call reads a secret-bearing path
+#   session_injection  highest ingest-time injection score of anything read this session
+#   data_links_from_injection 1 if data contains URLs/emails that came from injection-looking content
+
+version: 1
+
+# What happens to require_approval calls: queue (human decides in the dashboard),
+# auto_deny (benchmark default: treated as blocked), auto_allow (log-only mode).
+approval_mode: queue
+
+canary:
+  visible: false          # true -> plant "⟦c:…⟧" instead of zero-width encoding
+  every_chars: 160
+
+detectors:
+  canary_leak: {enabled: true}
+  heuristics: {enabled: true}
+  classifier: {enabled: true, model_path: classifier/model.joblib}
+  exfil: {enabled: true}
+  llm_judge:
+    enabled: false        # optional; needs Ollama. Never required for the benchmark.
+    url: http://ollama:11434
+    model: llama3.1:8b
+    timeout_s: 20
+
+# Ingest-time: content scoring above this is treated as "injection-looking".
+injection_threshold: 0.5
+
+# Destinations that are always trusted (in addition to anything the user or the
+# system prompt mentions in the current session).
+trusted:
+  hosts: []
+  emails: []
+  paths: []
+
+# Files the agent reads back later (writes here can persist a hijack).
+memory_paths: ["memory/*", "notes/*", "*.agent.md", ".agent/*", "*/memory/*"]
+# Files whose contents are secrets.
+sensitive_paths: ["~/.ssh/*", "~/.aws/*", "~/.env", "*.env", ".env", "secrets/*", "~/.config/*token*"]
+
+# Weights for the single combined score shown in the dashboard / audit log
+# (noisy-OR of weighted detector scores). Decisions come from the rules below.
+weights: {canary_leak: 1.0, exfil: 1.0, heuristics: 0.5, classifier: 0.5, llm_judge: 0.8}
+
+x-high-risk-rules: &high_risk_rules
+  - name: canary-in-destination
+    when: {canary: ">=0.9"}
+    action: block
+  - name: exfil-strong
+    when: {exfil: ">=0.8"}
+    action: block
+  - name: exfil-untrusted-destination
+    when: {exfil: ">=0.5"}
+    action: require_approval
+  - name: memory-poisoning
+    when: {memory_write: "==1", heuristics: ">=0.5", classifier: ">=0.4", taint: ">=0.2"}
+    action: require_approval
+  - name: memory-link-planting
+    when: {memory_write: "==1", data_links_from_injection: "==1"}
+    action: require_approval
+  - name: judge-says-injection
+    when: {llm_judge: ">=0.8"}
+    action: block
+  - name: default-allow
+    action: allow
+
+tools:
+  fetch_url:
+    risk: low
+    destination_fields: [url]
+    data_fields: []
+    rules:
+      - name: beacon-exfil-via-get
+        when: {exfil: ">=0.8"}
+        action: block
+      - name: default-allow
+        action: allow
+  read_email:
+    risk: low
+    destination_fields: []
+    data_fields: []
+    rules:
+      - {name: default-allow, action: allow}
+  read_file:
+    risk: medium
+    destination_fields: [path]
+    data_fields: []
+    rules:
+      - name: secret-read-after-injection
+        when: {sensitive_read: "==1", session_injection: ">=0.5"}
+        action: require_approval
+      - {name: default-allow, action: allow}
+  send_email:
+    risk: high
+    destination_fields: [to, cc, bcc]
+    data_fields: [subject, body]
+    rules: *high_risk_rules
+  http_post:
+    risk: high
+    destination_fields: [url]
+    data_fields: [data]
+    rules: *high_risk_rules
+  write_file:
+    risk: high
+    destination_fields: [path]
+    data_fields: [content]
+    rules: *high_risk_rules
+  delete_file:
+    risk: high
+    destination_fields: [path]
+    data_fields: []
+    rules: *high_risk_rules
+
+# Tools not listed above.
+default_tool:
+  risk: high
+  destination_fields: []
+  data_fields: []
+  rules: *high_risk_rules
