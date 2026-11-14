@@ -143,7 +143,7 @@ Detector scores and a few contextual features (`memory_write`, `sensitive_read`,
 
 ## Quickstart
 
-### Local (Python 3.11+)
+### Local (Python 3.12+, required by the pinned `requirements.txt`)
 ```bash
 make install          # .venv + requirements.txt
 make test             # 67 tests: unit, hypothesis fuzzing, end-to-end, benchmark smoke

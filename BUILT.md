@@ -28,7 +28,7 @@ What it still misses or flags:
 ## How to run
 
 ```bash
-make install && make test && make bench          # local, Python 3.11+
+make install && make test && make bench          # local, Python 3.12+
 docker compose up -d --build && make bench       # Docker stack (proxy :8080, attacker :8081, dashboard :8501)
 docker compose run --rm bench                    # benchmark entirely inside Docker
 make demo / python examples/quickstart.py        # traces / library usage
