@@ -65,6 +65,9 @@ def policy() -> dict:
 def create_session(body: SessionCreate) -> dict:
     fx = (body.fixtures or {}) if BENCH else {}
     sid = TW.new_session(body.system_prompt, body.user_turn, body.session_id)
+    old_sb = SANDBOXES.pop(sid, None)
+    if old_sb is not None:  # session id reused: don't leak the previous sandbox's temp dir
+        old_sb.close()
     SANDBOXES[sid] = Sandbox(mailbox=fx.get("mailbox"), files=fx.get("files"))
     while len(SANDBOXES) > MAX_SESSIONS:
         old, sb = SANDBOXES.popitem(last=False)

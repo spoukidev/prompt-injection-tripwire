@@ -96,6 +96,16 @@ def test_http_bypass_requires_flag(http_client, monkeypatch):
     assert r.status_code == 403
 
 
+def test_reused_session_id_closes_old_sandbox(http_client):
+    import tripwire.server as server
+
+    http_client.post("/session", json={"system_prompt": "x", "session_id": "reuse-me"})
+    first = server.SANDBOXES["reuse-me"]
+    http_client.post("/session", json={"system_prompt": "y", "session_id": "reuse-me"})
+    assert server.SANDBOXES["reuse-me"] is not first
+    assert not first.root.exists()
+
+
 def test_sandbox_refuses_real_hosts():
     from agent.tools import Sandbox, ToolError
 
