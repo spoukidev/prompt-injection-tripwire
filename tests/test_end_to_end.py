@@ -106,6 +106,10 @@ def test_reused_session_id_closes_old_sandbox(http_client):
     assert not first.root.exists()
 
 
+def test_taint_unknown_session_is_404(http_client):
+    assert http_client.get("/session/nope/taint").status_code == 404
+
+
 def test_sandbox_refuses_real_hosts():
     from agent.tools import Sandbox, ToolError
 

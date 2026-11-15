@@ -91,6 +91,7 @@ def sandbox_state(sid: str) -> dict:
 
 @app.get("/session/{sid}/taint")
 def taint_state(sid: str) -> dict:
+    _sandbox(sid)
     s = TW.session(sid)
     return {"trusted": {k: sorted(v) for k, v in s.trusted.items()}, "contacts": sorted(s.contacts),
             "records": [{"id": r.id, "source": r.source, "injection_score": r.injection_score,
