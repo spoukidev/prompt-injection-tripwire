@@ -23,7 +23,9 @@ import binascii
 import codecs
 import html
 import re
+import string
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
@@ -56,13 +58,22 @@ HOMOGLYPHS = {
 _HOMOGLYPH_TABLE = str.maketrans(HOMOGLYPHS)
 
 _B64_RE = re.compile(r"(?<![A-Za-z0-9+/=_-])([A-Za-z0-9+/_-]{16,}={0,2})(?![A-Za-z0-9+/=_-])")
-_HTML_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.S)
-_HIDDEN_STYLE_RE = re.compile(
-    r"<(\w+)[^>]*style\s*=\s*['\"][^'\"]*(display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|"
-    r"color\s*:\s*(#fff(fff)?|white)|opacity\s*:\s*0(?![.\d]*[1-9]))[^'\"]*['\"][^>]*>(.*?)</\1>",
-    re.S | re.I,
+# An unclosed comment hides everything after it, as in a browser. Matching to
+# the end of input also keeps the scan linear when "<!--" repeats unclosed.
+_HTML_COMMENT_RE = re.compile(r"<!--(.*?)(?:-->|\Z)", re.S)
+# Opening tags only: the matching close tag is found by _closed_elements(), which
+# stays linear when an attacker repeats unclosed tags (a lazy "(.*?)</\1>" in the
+# regex rescans to the end of the input for every one of them).
+_OPEN_TAG_RE = re.compile(r"<(\w+)\b([^>]{0,2000})>")
+# Tested against the attribute text of a single opening tag (group 2 above).
+_HIDDEN_STYLE_ATTR_RE = re.compile(
+    r"style\s*=\s*['\"][^'\"]*(display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|"
+    r"color\s*:\s*(#fff(fff)?|white)|opacity\s*:\s*0(?![.\d]*[1-9]))[^'\"]*['\"]",
+    re.I,
 )
-_HIDDEN_ATTR_RE = re.compile(r"<(\w+)[^>]*\b(hidden|aria-hidden\s*=\s*['\"]true['\"])[^>]*>(.*?)</\1>", re.S | re.I)
+_HIDDEN_ATTR_RE = re.compile(r"\b(hidden|aria-hidden\s*=\s*['\"]true['\"])", re.I)
+_SCRIPT_STYLE_OPEN_RE = re.compile(r"<(script|style)\b[^>]{0,2000}>", re.I)
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 _TAG_STRIP_RE = re.compile(r"<[^>]{0,2000}>")
 _WS_RE = re.compile(r"[ \t\r\f\v]+")
 _ROT13_HINT_RE = re.compile(r"\brot[\s_-]?13\b", re.I)
@@ -132,22 +143,61 @@ def decode_base64_segments(text: str, max_segments: int = 20) -> list[str]:
     return out
 
 
+def _closed_elements(
+    open_re: re.Pattern[str], text: str, attrs_re: re.Pattern[str] | None = None
+) -> Iterator[tuple[re.Match[str], int, int]]:
+    """Yield ``(open_match, close_start, close_end)`` for open tags that have a close tag.
+
+    Like ``finditer`` with ``(.*?)</\\1>`` appended to ``open_re``, but each missing
+    close tag is looked up once, so the scan is linear in ``len(text)``. When
+    ``attrs_re`` is given, only opening tags whose attribute text (group 2) matches
+    it are considered.
+    """
+    low = text.translate(_ASCII_LOWER)  # length-preserving, unlike str.lower()
+    next_close: dict[str, int] = {}
+    pos = 0
+    while (m := open_re.search(text, pos)) is not None:
+        if attrs_re is not None and not attrs_re.search(m.group(2)):
+            pos = m.start() + 1
+            continue
+        closing = "</" + m.group(1).translate(_ASCII_LOWER) + ">"
+        idx = next_close.get(closing)
+        if idx is None or (idx != -1 and idx < m.end()):
+            idx = low.find(closing, m.end())
+            next_close[closing] = idx
+        if idx == -1:
+            pos = m.start() + 1
+            continue
+        yield m, idx, idx + len(closing)
+        pos = idx + len(closing)
+
+
 def extract_hidden_html(text: str) -> list[str]:
     """Return text that a browser would not show: comments, display:none, hidden attrs, white text."""
     hidden: list[str] = []
     for m in _HTML_COMMENT_RE.finditer(text):
         hidden.append(m.group(1).strip())
-    for m in _HIDDEN_STYLE_RE.finditer(text):
-        hidden.append(_TAG_STRIP_RE.sub(" ", m.group(5)).strip())
-    for m in _HIDDEN_ATTR_RE.finditer(text):
-        hidden.append(_TAG_STRIP_RE.sub(" ", m.group(3)).strip())
+    for attrs_re in (_HIDDEN_STYLE_ATTR_RE, _HIDDEN_ATTR_RE):
+        for m, close_start, _ in _closed_elements(_OPEN_TAG_RE, text, attrs_re):
+            hidden.append(_TAG_STRIP_RE.sub(" ", text[m.end():close_start]).strip())
     return [h for h in hidden if h]
+
+
+def _strip_script_style(text: str) -> str:
+    parts: list[str] = []
+    pos = 0
+    for m, _, close_end in _closed_elements(_SCRIPT_STYLE_OPEN_RE, text):
+        parts.append(text[pos:m.start()])
+        parts.append(" ")
+        pos = close_end
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 def html_to_text(text: str) -> str:
     """Very small HTML -> text: keep comment bodies and hidden text (attackers hide there)."""
     t = _HTML_COMMENT_RE.sub(lambda m: " " + m.group(1) + " ", text)
-    t = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", t, flags=re.S | re.I)
+    t = _strip_script_style(t)
     t = _TAG_STRIP_RE.sub(" ", t)
     return t
 
