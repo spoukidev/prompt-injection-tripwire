@@ -110,6 +110,16 @@ def test_taint_unknown_session_is_404(http_client):
     assert http_client.get("/session/nope/taint").status_code == 404
 
 
+@pytest.mark.parametrize("limit", [-1, 0, 1001])
+def test_audit_limit_is_bounded(http_client, limit):
+    # SQLite reads LIMIT -1 as "no limit"; the endpoint must not dump the whole log
+    assert http_client.get("/audit", params={"limit": limit}).status_code == 422
+
+
+def test_audit_limit_accepts_valid_values(http_client):
+    assert http_client.get("/audit", params={"limit": 300}).status_code == 200
+
+
 def test_sandbox_refuses_real_hosts():
     from agent.tools import Sandbox, ToolError
 

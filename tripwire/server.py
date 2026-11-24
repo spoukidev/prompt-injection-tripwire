@@ -28,7 +28,7 @@ import os
 import time
 from collections import OrderedDict
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 
 from agent.tools import Sandbox
 from tripwire import __version__
@@ -41,6 +41,7 @@ TW = Tripwire(approval_mode=os.environ.get("TRIPWIRE_APPROVAL_MODE"))
 BENCH = os.environ.get("TRIPWIRE_BENCH_MODE") == "1"
 ALLOW_BYPASS = os.environ.get("TRIPWIRE_ALLOW_BYPASS") == "1"
 MAX_SESSIONS = 1000
+MAX_AUDIT_LIMIT = 1000  # SQLite treats LIMIT -1 as "no limit", so bound it explicitly
 SANDBOXES: "OrderedDict[str, Sandbox]" = OrderedDict()
 
 
@@ -115,7 +116,7 @@ def tool(name: str, body: ToolRequest, x_tripwire_bypass: str | None = Header(de
 
 
 @app.get("/audit")
-def audit(limit: int = 200, session_id: str | None = None) -> list[dict]:
+def audit(limit: int = Query(200, ge=1, le=MAX_AUDIT_LIMIT), session_id: str | None = None) -> list[dict]:
     if not TW.audit:
         return []
     out = []
